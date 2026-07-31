@@ -143,4 +143,36 @@ d & f::
     }
 }
 
+; --- Ctrl + D + S : Créer un raccourci standard Windows ---
+d & s::
+{
+    Path := GetSelectedPath()
+    
+    ; Fallback Presse-papier si la sélection via COM échoue
+    if (Path == "") {
+        A_Clipboard := ""
+        Send("^c")
+        if ClipWait(1)
+            Path := A_Clipboard
+    }
+
+    if (Path != "") {
+        SplitPath(Path, &FileName, &Dir)
+        try {
+            ShellApp := ComObject("Shell.Application")
+            Folder := ShellApp.NameSpace(Dir)
+            FolderItem := Folder.ParseName(FileName)
+            
+            ; Action native Windows : "Créer un raccourci"
+            FolderItem.InvokeVerb("link")
+            
+            ToolTip("Standard shortcut created!")
+            SetTimer () => ToolTip(), -2000
+        } catch {
+            ToolTip("Failed to create shortcut")
+            SetTimer () => ToolTip(), -2000
+        }
+    }
+}
+
 #HotIf
