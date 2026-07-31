@@ -1,6 +1,6 @@
 # RelativeShortcutWindows (RSW)
 
-> Easily create true relative shortcuts (`.lnk`) in Windows 10/11 using keyboard hotkeys or the right-click context menu.
+> Easily create true relative shortcuts (`.lnk`) or standard shortcuts in Windows 10/11 using keyboard hotkeys or the right-click context menu.
 
 Windows shortcuts natively refuse relative paths (e.g., `..\Folder`). **RelativeShortcutWindows** solves this by dynamically calculating the lowest common ancestor path between source and target, allowing you to move or share your directory structures without breaking shortcuts.
 
@@ -9,12 +9,13 @@ Windows shortcuts natively refuse relative paths (e.g., `..\Folder`). **Relative
 ## Features
 
 - **Keyboard Shortcuts:**
-  - `Ctrl` + `D` + `C`: Copy target path.
+  - `Ctrl` + `D` + `C`: Copy target path for relative shortcut.
   - `Ctrl` + `D` + `V`: Paste as a relative shortcut in the current folder.
   - `Ctrl` + `D` + `F`: Convert an existing absolute shortcut (`.lnk`) to a relative shortcut.
+  - `Ctrl` + `D` + `S`: Create a standard native Windows shortcut (`.lnk`).
 - **Context Menu Integration:** Native right-click menu options in File Explorer (`[RSW]`).
 - **Full Unicode (UTF-16) Support:** Flawlessly handles special characters, accented letters, emojis, and non-ANSI alphabets (Gujarati, Cyrillic, Japanese, etc.).
-- **Dynamic & Portable:** Uses `explorer.exe` with relative path arguments (`..\path\to\target`) so your links don't break on external drives, USBs, or cloud syncs.
+- **Dynamic & Portable:** Uses `explorer.exe` with relative path arguments (`..\path\to\target`) so your relative links don't break on external drives, USBs, or cloud syncs.
 - **Silent Execution:** Runs completely hidden in the background with zero terminal pop-ups.
 - **Auto-Configuring:** Keeps context menu paths updated automatically in the Registry when launching `Shortcuts.ahk`.
 
@@ -48,12 +49,15 @@ To keep the keyboard shortcuts active every time you turn on your PC:
 
 ### Method 1: Keyboard Hotkeys
 
-- **Copy & Paste Relative Shortcut:**
+- **Relative Shortcuts:**
   1. Select the source file or folder and press `Ctrl` + `D` + `C` *(Copy target)*.
   2. Navigate to your destination directory and press `Ctrl` + `D` + `V` *(Paste relative shortcut)*.
 - **Convert Existing Shortcut:**
   1. Select any existing standard (`.lnk`) shortcut.
   2. Press `Ctrl` + `D` + `F` *(Convert to relative)*.
+- **Standard Native Shortcut:**
+  1. Select any file or folder.
+  2. Press `Ctrl` + `D` + `S` *(Creates a standard shortcut in the same folder)*.
 
 ### Method 2: Context Menu (Right-Click)
 
@@ -67,7 +71,7 @@ To keep the keyboard shortcuts active every time you turn on your PC:
 
 ## How It Works
 
-1. **AutoHotkey (`Shortcuts.ahk`):** Captures the selected file/folder paths via Shell COM interfaces and triggers background PowerShell actions silently.
+1. **AutoHotkey (`Shortcuts.ahk`):** Captures the selected file/folder paths via Shell COM interfaces and handles hotkeys seamlessly without conflict.
 2. **PowerShell (`MakeRelativeShortcut.ps1`):** 
    - Calculates the exact relative URI path (`System.Uri.MakeRelativeUri`).
    - Uses `Shell.Application` COM methods to read and write UTF-16 Unicode paths natively (bypassing legacy ANSI limitations of `WScript.Shell`).
