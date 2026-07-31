@@ -1,116 +1,182 @@
 param (
-    [string]$Action,
-    [string]$Path
+    [string]$Action = "",
+    [string]$Path = ""
 )
 
-$TempFile = "$env:TEMP\rsw_shortcut_source.txt"
+$LogFile = "$env:TEMP\rsw_debug.log"
 
-# --- COPY (Inchangé) ---
-if ($Action -eq "copy") {
-    $CleanPath = $Path.Trim('"')
-    $CleanPath | Out-File -FilePath $TempFile -Encoding utf8 -Force
+function Log-Msg ($msg) {
+    $time = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "[$time] [PS] $msg" | Out-File -FilePath $LogFile -Append -Encoding UTF8
 }
-# --- PASTE (Inchangé) ---
-elseif ($Action -eq "paste") {
-    if (-not (Test-Path $TempFile)) { exit }
-    
-    $SourcePath = (Get-Content -Path $TempFile -Raw).Trim()
-    
-    if (-not $Path -or $Path -eq "%V") {
-        $DestDir = Get-Location
-    } else {
-        $CleanPath = $Path.Trim('"')
-        if (Test-Path -Path $CleanPath -PathType Container) {
-            $DestDir = $CleanPath
-        } else {
-            $DestDir = Split-Path -Path $CleanPath -Parent
-        }
-    }
-    
-    $SourceUri = New-Object System.Uri($SourcePath)
-    $DestUri = New-Object System.Uri(($DestDir.ToString().TrimEnd('\') + "\"))
-    $RelativeUri = $DestUri.MakeRelativeUri($SourceUri)
-    $RelativePath = [System.Uri]::UnescapeDataString($RelativeUri.ToString()).Replace('/', '\')
-    
-    $TargetName = Split-Path -Path $SourcePath -Leaf
-    $ShortcutPath = Join-Path -Path $DestDir -ChildPath "$TargetName.lnk"
-    
-    $WScriptShell = New-Object -ComObject WScript.Shell
-    $Shortcut = $WScriptShell.CreateShortcut($ShortcutPath)
-    $Shortcut.TargetPath = "explorer.exe"
-    $Shortcut.Arguments = """$RelativePath"""
-    $Shortcut.WorkingDirectory = "%CD%"
-    
-    if (Test-Path -Path $SourcePath -PathType Container) {
-        $Shortcut.IconLocation = "shell32.dll,3"
-    } else {
-        $Shortcut.IconLocation = "shell32.dll,0"
-    }
-    
-    $Shortcut.Save()
-}
-# --- CONVERT (Corrigé : Suppression avant réécriture) ---
-elseif ($Action -eq "convert") {
-    $LnkPath = $Path.Trim('"')
-    if (-not (Test-Path -Path $LnkPath)) { exit }
 
-    # 1. On lit la cible actuelle
-    $WScriptShell = New-Object -ComObject WScript.Shell
-    $Shortcut = $WScriptShell.CreateShortcut($LnkPath)
-    $OriginalTarget = $Shortcut.TargetPath
-
-    if ($OriginalTarget -like "*explorer.exe*" -and $Shortcut.Arguments) {
-        $OriginalTarget = $Shortcut.Arguments.Trim('"')
-    }
-
-    if (-not $OriginalTarget) { exit }
-
-    # 2. On cherche le dossier correspondant
-    $DestDir = Split-Path -Path $LnkPath -Parent
-    $FoundTarget = $null
-
-    if (Test-Path -Path $OriginalTarget) {
-        $FoundTarget = $OriginalTarget
-    } else {
-        $Parts = $OriginalTarget.Split([System.IO.Path]::DirectorySeparatorChar, [System.StringSplitOptions]::RemoveEmptyEntries)
-        $CurrentCheck = $DestDir
+# Lecture de la cible avec Shell.Application (Unicode UTF-16)
+function Get-LnkTargetUnicode ([string]$lnkPath) {
+    try {
+        $shell = New-Object -ComObject Shell.Application
+        $dir = [System.IO.Path]::GetDirectoryName($lnkPath)
+        $file = [System.IO.Path]::GetFileName($lnkPath)
+        $folder = $shell.NameSpace($dir)
+        $item = $folder.ParseName($file)
         
-        while ($CurrentCheck) {
-            for ($i = $Parts.Length - 1; $i -ge 0; $i--) {
-                $SubPath = ($Parts[$i..($Parts.Length - 1)]) -join "\"
-                $Candidate = Join-Path -Path $CurrentCheck -ChildPath $SubPath
-                if (Test-Path -Path $Candidate) {
-                    $FoundTarget = $Candidate
-                    break
-                }
+        if ($item -and $item.IsLink) {
+            $link = $item.GetLink
+            $target = $link.Path
+            $args = $link.Arguments
+            
+            if ($target -like "*explorer.exe*" -and $args) {
+                return $args.Trim('"')
             }
-            if ($FoundTarget) { break }
-            $CurrentCheck = Split-Path -Path $CurrentCheck -Parent
+            if ($target) {
+                return $target
+            }
         }
+    } catch {
+        Log-Msg "Erreur lecture Shell.Application: $_"
+    }
+    return $null
+}
+
+# Création / Écriture du raccourci en UTF-16 via Shell.Application
+function Write-RelativeShortcut ([string]$shortcutPath, [string]$relativePath, [bool]$isFolder) {
+    $destDir = [System.IO.Path]::GetDirectoryName($shortcutPath)
+    $fileName = [System.IO.Path]::GetFileName($shortcutPath)
+
+    # 1. Génération de la structure de base du fichier .lnk
+    $WScriptShell = New-Object -ComObject WScript.Shell
+    $sc = $WScriptShell.CreateShortcut($shortcutPath)
+    $sc.TargetPath = "explorer.exe"
+    $sc.Save()
+
+    # 2. Réécriture des propriétés en UTF-16 via Shell.Application
+    $sh = New-Object -ComObject Shell.Application
+    $folder = $sh.NameSpace($destDir)
+    $item = $folder.ParseName($fileName)
+    
+    if ($item -and $item.IsLink) {
+        $link = $item.GetLink
+        $link.Path = "explorer.exe"
+        $link.Arguments = """$relativePath"""
+        $link.WorkingDirectory = "%CD%"
+        $iconIdx = if ($isFolder) { 3 } else { 0 }
+        try { $link.SetIconLocation("shell32.dll", $iconIdx) } catch {}
+        $link.Save()
+    }
+}
+
+# Résolution de la cible sur le disque
+function Resolve-TargetPath ([string]$targetPath, [string]$destDir) {
+    if (-not $targetPath) { return $null }
+
+    if (Test-Path -LiteralPath $targetPath) {
+        return $targetPath
     }
 
-    # 3. Réécriture propre
-    if ($FoundTarget) {
-        $SourceUri = New-Object System.Uri($FoundTarget)
+    $parts = $targetPath.Split([System.IO.Path]::DirectorySeparatorChar, [System.StringSplitOptions]::RemoveEmptyEntries)
+    $currentCheck = $destDir
+
+    while ($currentCheck) {
+        for ($i = $parts.Length - 1; $i -ge 0; $i--) {
+            $subPath = ($parts[$i..($parts.Length - 1)]) -join "\"
+            $candidate = Join-Path -Path $currentCheck -ChildPath $subPath
+
+            if (Test-Path -LiteralPath $candidate) {
+                return $candidate
+            }
+        }
+        $currentCheck = [System.IO.Path]::GetDirectoryName($currentCheck)
+    }
+
+    return $null
+}
+
+try {
+    $ArgFile  = "$env:TEMP\rsw_arg.txt"
+    $TempFile = "$env:TEMP\rsw_shortcut_source.txt"
+
+    if (-not $Path -and (Test-Path -LiteralPath $ArgFile)) {
+        $Path = (Get-Content -LiteralPath $ArgFile -Encoding UTF8 -Raw).Trim()
+    }
+
+    Log-Msg "Execution - Action: '$Action' | Path: '$Path'"
+
+    # --- COPY ---
+    if ($Action -eq "copy") {
+        $CleanPath = $Path.Trim('"')
+        Set-Content -LiteralPath $TempFile -Value $CleanPath -Encoding UTF8 -Force
+        Log-Msg "Copy OK. Path stocke: '$CleanPath'"
+    }
+    # --- PASTE ---
+    elseif ($Action -eq "paste") {
+        if (-not (Test-Path -LiteralPath $TempFile)) {
+            Log-Msg "Paste ECHEC: $TempFile introuvable"
+            exit
+        }
+        
+        $SourcePath = (Get-Content -LiteralPath $TempFile -Encoding UTF8 -Raw).Trim()
+        Log-Msg "Paste SourcePath: '$SourcePath'"
+        
+        if (-not $Path -or $Path -eq "%V") {
+            $DestDir = (Get-Location).Path
+        } else {
+            $CleanPath = $Path.Trim('"')
+            if ([System.IO.Directory]::Exists($CleanPath)) {
+                $DestDir = $CleanPath
+            } else {
+                $DestDir = [System.IO.Path]::GetDirectoryName($CleanPath)
+            }
+        }
+        Log-Msg "Paste DestDir: '$DestDir'"
+        
+        $SourceUri = New-Object System.Uri($SourcePath)
         $DestUri = New-Object System.Uri(($DestDir.ToString().TrimEnd('\') + "\"))
         $RelativeUri = $DestUri.MakeRelativeUri($SourceUri)
         $RelativePath = [System.Uri]::UnescapeDataString($RelativeUri.ToString()).Replace('/', '\')
+        Log-Msg "Paste RelativePath: '$RelativePath'"
 
-        # FIX : Suppression obligatoire du fichier corrompu/existant avant la réécriture
-        Remove-Item -Path $LnkPath -Force -ErrorAction SilentlyContinue
-
-        # Re-création d'un raccourci totalement neuf
-        $NewShortcut = $WScriptShell.CreateShortcut($LnkPath)
-        $NewShortcut.TargetPath = "explorer.exe"
-        $NewShortcut.Arguments = """$RelativePath"""
-        $NewShortcut.WorkingDirectory = "%CD%"
+        $TargetName = [System.IO.Path]::GetFileName($SourcePath)
+        $ShortcutPath = Join-Path -Path $DestDir -ChildPath "$TargetName.lnk"
         
-        if (Test-Path -Path $FoundTarget -PathType Container) {
-            $NewShortcut.IconLocation = "shell32.dll,3"
-        } else {
-            $NewShortcut.IconLocation = "shell32.dll,0"
-        }
-        
-        $NewShortcut.Save()
+        Write-RelativeShortcut -shortcutPath $ShortcutPath -relativePath $RelativePath -isFolder ([System.IO.Directory]::Exists($SourcePath))
+        Log-Msg "Paste SUCCES -> '$ShortcutPath'"
     }
+    # --- CONVERT ---
+    elseif ($Action -eq "convert") {
+        $LnkPath = $Path.Trim('"')
+        Log-Msg "Convert LnkPath: '$LnkPath'"
+        
+        if (-not (Test-Path -LiteralPath $LnkPath)) {
+            Log-Msg "Convert ECHEC: $LnkPath introuvable sur disque"
+            exit
+        }
+
+        $OriginalTarget = Get-LnkTargetUnicode -lnkPath $LnkPath
+        Log-Msg "Convert Target originale: '$OriginalTarget'"
+
+        if (-not $OriginalTarget) {
+            Log-Msg "Convert ECHEC: Target originale vide"
+            exit
+        }
+
+        $DestDir = [System.IO.Path]::GetDirectoryName($LnkPath)
+        $FoundTarget = Resolve-TargetPath -targetPath $OriginalTarget -destDir $DestDir
+
+        Log-Msg "Convert FoundTarget final: '$FoundTarget'"
+
+        if ($FoundTarget) {
+            $SourceUri = New-Object System.Uri($FoundTarget)
+            $DestUri = New-Object System.Uri(($DestDir.ToString().TrimEnd('\') + "\"))
+            $RelativeUri = $DestUri.MakeRelativeUri($SourceUri)
+            $RelativePath = [System.Uri]::UnescapeDataString($RelativeUri.ToString()).Replace('/', '\')
+
+            Remove-Item -LiteralPath $LnkPath -Force -ErrorAction SilentlyContinue
+
+            Write-RelativeShortcut -shortcutPath $LnkPath -relativePath $RelativePath -isFolder ([System.IO.Directory]::Exists($FoundTarget))
+            Log-Msg "Convert SUCCES pour '$LnkPath'"
+        } else {
+            Log-Msg "Convert ECHEC: Impossible de resoudre FoundTarget"
+        }
+    }
+} catch {
+    Log-Msg "EXCEPTION: $_"
 }
