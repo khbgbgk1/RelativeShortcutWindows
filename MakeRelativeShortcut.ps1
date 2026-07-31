@@ -10,8 +10,19 @@ function Log-Msg ($msg) {
     "[$time] [PS] $msg" | Out-File -FilePath $LogFile -Append -Encoding UTF8
 }
 
-# Lecture de la cible avec Shell.Application (Unicode UTF-16)
-function Get-LnkTargetUnicode ([string]$lnkPath) {
+# Extraction de la cible et de l'icône originale d'un raccourci
+function Get-LnkInfo ([string]$lnkPath) {
+    $target = $null
+    $icon = ""
+
+    # 1. Extraction de l'icône via WScript.Shell
+    try {
+        $WScriptShell = New-Object -ComObject WScript.Shell
+        $sc = $WScriptShell.CreateShortcut($lnkPath)
+        $icon = $sc.IconLocation
+    } catch {}
+
+    # 2. Extraction de la cible en Unicode via Shell.Application
     try {
         $shell = New-Object -ComObject Shell.Application
         $dir = [System.IO.Path]::GetDirectoryName($lnkPath)
@@ -21,46 +32,86 @@ function Get-LnkTargetUnicode ([string]$lnkPath) {
         
         if ($item -and $item.IsLink) {
             $link = $item.GetLink
-            $target = $link.Path
+            $t = $link.Path
             $args = $link.Arguments
             
-            if ($target -like "*explorer.exe*" -and $args) {
-                return $args.Trim('"')
-            }
-            if ($target) {
-                return $target
+            if ($t -like "*explorer.exe*" -and $args) {
+                $target = $args.Trim('"')
+            } elseif ($t) {
+                $target = $t
             }
         }
     } catch {
-        Log-Msg "Erreur lecture Shell.Application: $_"
+        Log-Msg "Erreur Shell.Application: $_"
     }
-    return $null
+
+    # Fallback WScript.Shell pour la cible si Shell.Application échoue
+    if (-not $target) {
+        try {
+            $WScriptShell = New-Object -ComObject WScript.Shell
+            $sc = $WScriptShell.CreateShortcut($lnkPath)
+            $t = $sc.TargetPath
+            if ($t -like "*explorer.exe*" -and $sc.Arguments) {
+                $target = $sc.Arguments.Trim('"')
+            } else {
+                $target = $t
+            }
+        } catch {}
+    }
+
+    return @{
+        Target = $target
+        Icon   = $icon
+    }
 }
 
-# Création / Écriture du raccourci en UTF-16 via Shell.Application
-function Write-RelativeShortcut ([string]$shortcutPath, [string]$relativePath, [bool]$isFolder) {
+# Création / Écriture du raccourci avec conservation de l'icône
+function Write-RelativeShortcut ([string]$shortcutPath, [string]$relativePath, [string]$targetPath, [string]$customIcon = "") {
     $destDir = [System.IO.Path]::GetDirectoryName($shortcutPath)
     $fileName = [System.IO.Path]::GetFileName($shortcutPath)
 
-    # 1. Génération de la structure de base du fichier .lnk
+    # Détermination de l'icône à appliquer
+    if ($customIcon -and $customIcon.Trim() -ne "" -and $customIcon -ne ",0") {
+        $iconStr = $customIcon
+    } elseif ([System.IO.Directory]::Exists($targetPath)) {
+        $iconStr = "shell32.dll,3" # Icône de dossier par défaut
+    } else {
+        $iconStr = "$targetPath,0" # Icône native du fichier/exécutable ciblé
+    }
+
+    # Séparation du chemin d'icône et de son index
+    $parts = $iconStr.Split(',')
+    $iconFile = $parts[0].Trim()
+    $iconIndex = 0
+    if ($parts.Length -gt 1) {
+        [int]::TryParse($parts[1].Trim(), [ref]$iconIndex) | Out-Null
+    }
+
+    # 1. Structure de base via WScript.Shell
     $WScriptShell = New-Object -ComObject WScript.Shell
     $sc = $WScriptShell.CreateShortcut($shortcutPath)
     $sc.TargetPath = "explorer.exe"
+    $sc.Arguments = """$relativePath"""
+    $sc.WorkingDirectory = "%CD%"
+    $sc.IconLocation = "$iconFile,$iconIndex"
     $sc.Save()
 
-    # 2. Réécriture des propriétés en UTF-16 via Shell.Application
-    $sh = New-Object -ComObject Shell.Application
-    $folder = $sh.NameSpace($destDir)
-    $item = $folder.ParseName($fileName)
-    
-    if ($item -and $item.IsLink) {
-        $link = $item.GetLink
-        $link.Path = "explorer.exe"
-        $link.Arguments = """$relativePath"""
-        $link.WorkingDirectory = "%CD%"
-        $iconIdx = if ($isFolder) { 3 } else { 0 }
-        try { $link.SetIconLocation("shell32.dll", $iconIdx) } catch {}
-        $link.Save()
+    # 2. Réécriture UTF-16 Unicode via Shell.Application
+    try {
+        $sh = New-Object -ComObject Shell.Application
+        $folder = $sh.NameSpace($destDir)
+        $item = $folder.ParseName($fileName)
+        
+        if ($item -and $item.IsLink) {
+            $link = $item.GetLink
+            $link.Path = "explorer.exe"
+            $link.Arguments = """$relativePath"""
+            $link.WorkingDirectory = "%CD%"
+            try { $link.SetIconLocation($iconFile, $iconIndex) } catch {}
+            $link.Save()
+        }
+    } catch {
+        Log-Msg "Erreur ecriture Shell.Application: $_"
     }
 }
 
@@ -137,7 +188,7 @@ try {
         $TargetName = [System.IO.Path]::GetFileName($SourcePath)
         $ShortcutPath = Join-Path -Path $DestDir -ChildPath "$TargetName.lnk"
         
-        Write-RelativeShortcut -shortcutPath $ShortcutPath -relativePath $RelativePath -isFolder ([System.IO.Directory]::Exists($SourcePath))
+        Write-RelativeShortcut -shortcutPath $ShortcutPath -relativePath $RelativePath -targetPath $SourcePath
         Log-Msg "Paste SUCCES -> '$ShortcutPath'"
     }
     # --- CONVERT ---
@@ -150,8 +201,10 @@ try {
             exit
         }
 
-        $OriginalTarget = Get-LnkTargetUnicode -lnkPath $LnkPath
-        Log-Msg "Convert Target originale: '$OriginalTarget'"
+        $LnkInfo = Get-LnkInfo -lnkPath $LnkPath
+        $OriginalTarget = $LnkInfo.Target
+        $OriginalIcon   = $LnkInfo.Icon
+        Log-Msg "Convert Target originale: '$OriginalTarget' | Icone originale: '$OriginalIcon'"
 
         if (-not $OriginalTarget) {
             Log-Msg "Convert ECHEC: Target originale vide"
@@ -171,7 +224,7 @@ try {
 
             Remove-Item -LiteralPath $LnkPath -Force -ErrorAction SilentlyContinue
 
-            Write-RelativeShortcut -shortcutPath $LnkPath -relativePath $RelativePath -isFolder ([System.IO.Directory]::Exists($FoundTarget))
+            Write-RelativeShortcut -shortcutPath $LnkPath -relativePath $RelativePath -targetPath $FoundTarget -customIcon $OriginalIcon
             Log-Msg "Convert SUCCES pour '$LnkPath'"
         } else {
             Log-Msg "Convert ECHEC: Impossible de resoudre FoundTarget"
